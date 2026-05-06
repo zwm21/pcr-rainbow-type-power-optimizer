@@ -258,24 +258,39 @@ def task_full_prismatic(base_data, equip_data, optimal_power, normal_types, pris
         w_type = get_weapon_type(cur['weapon'], normal_types, prismatic_info)
         if w_type not in full_bonus:
             continue
+
+        # 当前总加成
         cur_total = merge_bonuses(cur['weapon_bonus'], cur['armor_bonus'], cur['acc_bonus'])
+        # 用文件最优战力反推真实固定战力
+        _, cur_panel = calc_power(base, cur_total)
+        real_fixed = optimal_power[name] - cur_panel
+
+        # 重算当前最优战力（反推后重新计算确保一致性）
+        recalc_cur = cur_panel + real_fixed
+
+        # 新武器总加成
         new_total = cur_total.copy()
         for attr, val in cur['weapon_bonus'].items():
             new_total[attr] -= val
         for attr, val in full_bonus[w_type].items():
             new_total[attr] = new_total.get(attr, 0) + val
         new_total = {k: v for k, v in new_total.items() if abs(v) > 1e-9}
-        new_pow, _ = calc_power(base, new_total)
-        opt = optimal_power[name]
-        results.append((new_pow - opt, name, w_type, new_pow, opt))
-    results.sort(reverse=True)
+
+        _, new_panel = calc_power(base, new_total)
+        new_pow = new_panel + real_fixed
+
+        file_opt = optimal_power[name]
+        gain = new_pow - recalc_cur   # 净提升 = 满词条战力 - 重算当前
+        results.append((gain, name, w_type, new_pow, recalc_cur, file_opt))
+
+    results.sort(reverse=True, key=lambda x: x[0])
     return results
 
 # ============================================================
 # 任务二/三：贪心模拟
 # ============================================================
 class CharState:
-    def __init__(self, name, base, equip_dict, normal_types, prismatic_info):
+    def __init__(self, name, base, equip_dict, normal_types, prismatic_info, actual_optimal_power):
         self.name = name
         self.base = base
         self.cur_weapon = equip_dict['weapon']
@@ -285,7 +300,13 @@ class CharState:
         self.armor_bonus = equip_dict['armor_bonus'].copy()
         self.acc_bonus = equip_dict['acc_bonus'].copy()
         self.total_bonus = merge_bonuses(self.weapon_bonus, self.armor_bonus, self.acc_bonus)
-        self.cur_power, _ = calc_power(self.base, self.total_bonus)
+        
+        # 计算当前面板战力贡献
+        _, cur_panel = calc_power(self.base, self.total_bonus)
+        # 用文件最优总战力反推真实固定战力
+        self.real_fixed = actual_optimal_power - cur_panel
+        
+        self.cur_power = actual_optimal_power
         self.w_type = get_weapon_type(self.cur_weapon, normal_types, prismatic_info)
         self.got_new = False
 
@@ -293,13 +314,16 @@ class CharState:
         self.cur_weapon = wname
         self.weapon_bonus = bonus.copy()
         self.total_bonus = merge_bonuses(self.weapon_bonus, self.armor_bonus, self.acc_bonus)
-        self.cur_power, _ = calc_power(self.base, self.total_bonus)
+        _, panel = calc_power(self.base, self.total_bonus)
+        self.cur_power = self.real_fixed + panel
 
 def simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismatic_info, sub_pct, rounds):
     states = {}
     for name, base in base_data.items():
-        if name in equip_data:
-            states[name] = CharState(name, base, equip_data[name], normal_types, prismatic_info)
+        if name in equip_data and name in optimal_power:
+            # 传入 optimal_power[name] 用于初始化真实固定战力
+            states[name] = CharState(name, base, equip_data[name], normal_types, prismatic_info, optimal_power[name])
+    # 后面代码保持不变……
 
     def get_queue(w_type):
         q = []
@@ -320,7 +344,8 @@ def simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismati
         for attr, val in new_bonus.items():
             new_total[attr] = new_total.get(attr, 0) + val
         new_total = {k:v for k,v in new_total.items() if abs(v)>1e-9}
-        new_pow, _ = calc_power(st.base, new_total)
+        _, new_panel = calc_power(st.base, new_total)   # 只取面板战力
+        new_pow = st.real_fixed + new_panel
         return new_pow, new_pow - st.cur_power
 
     def make_new_prismatic(w_type):
@@ -418,31 +443,28 @@ def generate_report(full_results, ops, all_type_details, sub_pct_str, rounds, le
     lines.append("============================================================")
     lines.append("       公主连结 EX 装备战力优化报告")
     lines.append(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"角色等级：{level}（假设全角色已开专武、二专、6星）")
+    lines.append(f"角色等级：{level}（已按角色实际开专/6星/二专反推固定加成）")
     lines.append("============================================================\n")
     lines.append(f"彩装副词条：{sub_pct_str}%    分配轮次：{rounds}\n")
 
-    # 任务一
+    # 任务一：满词条排名
     lines.append("一、满词条彩武(20.68%攻击)单角色净提升排名 (前20)\n")
-    lines.append(f"{'排名':<4} {'角色':<8} {'武器类型':<10} {'满词条战力':>8} {'当前最优':>8} {'净提升':>6}")
-    lines.append("-" * 50)
-    for i, (gain, name, wtype, new_pow, opt_pow) in enumerate(full_results[:20], 1):
-        lines.append(f"{i:<4} {name:<8} {wtype:<10} {new_pow:>8} {opt_pow:>8} {gain:>6}")
+    lines.append(f"{'排名':<4} {'角色':<8} {'武器类型':<10} {'满词条战力':>8} {'重算当前':>8} {'净提升':>6} {'文件原始':>8}")
+    lines.append("-" * 60)
+    for i, (gain, name, wtype, new_pow, recalc_cur, file_opt) in enumerate(full_results[:20], 1):
+        lines.append(f"{i:<4} {name:<8} {wtype:<10} {new_pow:>8} {recalc_cur:>8} {gain:>6} {file_opt:>8}")
     lines.append("")
 
-    # 任务二/三 详细过程
+    # 任务二/三：贪心过程（保持不变）
     lines.append("二、贪心算法详细过程\n")
     for idx, details in enumerate(all_type_details, 1):
         lines.append(f"第{idx}轮：每种彩武类型的最佳总净增长")
         lines.append(f"{'彩武类型':<10} {'总净增长':>8}   {'主提升角色(首位)':<12}")
         lines.append("-" * 40)
-        # 按增益降序排列显示
         sorted_types = sorted(details.items(), key=lambda x: x[1][0], reverse=True)
         for wtype, (gain, first_name, chain) in sorted_types:
             lines.append(f"{wtype:<10} {gain:>8.0f}   {first_name:<12}")
         lines.append("")
-        # 输出被选中的类型的具体链条
-        # 找到实际执行的那一轮（ops 中对应 round 编号）
         if idx <= len(ops):
             chosen = ops[idx-1]
             lines.append(f"本轮实际选择：{chosen['type']}，链条详情：")
@@ -453,6 +475,7 @@ def generate_report(full_results, ops, all_type_details, sub_pct_str, rounds, le
                     lines.append(f"  -> {cname} 获得 {weapon}（来自 {from_who}），战力变化 {boost:+.0f}")
             lines.append(f"  本轮总净增长：{sum(s[2] for s in chosen['steps']):+.0f}")
         lines.append("")
+
     # 全队总净增长
     total_all = 0
     for log in ops:
@@ -496,13 +519,14 @@ def main():
 
     print(f"已加载 {len(base_data)} 名角色基础面板")
 
-    # 任务一
+    # 任务一打印
     print("\n=== 计算满词条彩武净提升 ===")
     full_results = task_full_prismatic(base_data, equip_data, optimal_power, normal_types, prismatic_info)
+
     print("\n满词条彩武净提升前20名：")
-    print(f"{'排名':<4} {'角色':<8} {'武器类型':<10} {'满词条战力':>8} {'当前最优':>8} {'净提升':>6}")
-    for i, (gain, name, wtype, new_pow, opt_pow) in enumerate(full_results[:20], 1):
-        print(f"{i:<4} {name:<8} {wtype:<10} {new_pow:>8} {opt_pow:>8} {gain:>6}")
+    print(f"{'排名':<4} {'角色':<8} {'武器类型':<10} {'满词条战力':>8} {'重算当前':>8} {'净提升':>6} {'文件原始':>8}")
+    for i, (gain, name, wtype, new_pow, recalc_cur, file_opt) in enumerate(full_results[:20], 1):
+        print(f"{i:<4} {name:<8} {wtype:<10} {new_pow:>8} {recalc_cur:>8} {gain:>6} {file_opt:>8}")
 
     # 任务二/三
     sub_pct_str = input("\n请输入彩装副词条百分比（例如8.8）：")
