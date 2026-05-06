@@ -374,16 +374,26 @@ def simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismati
         return best_chain, best_gain
 
     ops = []
+    # 记录每轮所有类型的模拟结果用于报告
+    all_type_details = []
+
     for rnd in range(rounds):
         all_types = ['彩弓','彩拳套','彩斧','彩单手剑','彩双手剑','彩杖','彩书','彩矛','彩短剑','彩盾']
         type_candidates = {}
+        details_this_round = {}
         for wtype in all_types:
             chain, gain = simulate_type(wtype)
             type_candidates[wtype] = (chain, gain)
+            # 记录摘要：总增益和链条中的第一个角色（如果有）
+            first_name = chain[0][0] if chain else "无"
+            details_this_round[wtype] = (gain, first_name, chain)
         best_type = max(type_candidates, key=lambda k: type_candidates[k][1])
         best_chain, best_gain = type_candidates[best_type]
         if best_gain <= 0 or not best_chain:
+            print(f"第{rnd+1}轮没有正提升组合，模拟停止。")
+            all_type_details.append(details_this_round)
             break
+        # 执行更新
         log = {'round': rnd+1, 'type': best_type, 'steps': []}
         for idx, (cname, old, bonus, boost) in enumerate(best_chain):
             st = states[cname]
@@ -395,12 +405,15 @@ def simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismati
                 st.set_weapon(old, bonus)
                 log['steps'].append((cname, old, boost, best_chain[idx-1][0]))
         ops.append(log)
-    return ops
+        all_type_details.append(details_this_round)
+        print(f"第{rnd+1}轮完成，选择类型：{best_type}，总增益：{best_gain:.0f}")
+
+    return ops, all_type_details
 
 # ============================================================
 # 报告生成
 # ============================================================
-def generate_report(full_results, ops, sub_pct_str, rounds, level):
+def generate_report(full_results, ops, all_type_details, sub_pct_str, rounds, level):
     lines = []
     lines.append("============================================================")
     lines.append("       公主连结 EX 装备战力优化报告")
@@ -409,6 +422,7 @@ def generate_report(full_results, ops, sub_pct_str, rounds, level):
     lines.append("============================================================\n")
     lines.append(f"彩装副词条：{sub_pct_str}%    分配轮次：{rounds}\n")
 
+    # 任务一
     lines.append("一、满词条彩武(20.68%攻击)单角色净提升排名 (前20)\n")
     lines.append(f"{'排名':<4} {'角色':<8} {'武器类型':<10} {'满词条战力':>8} {'当前最优':>8} {'净提升':>6}")
     lines.append("-" * 50)
@@ -416,17 +430,34 @@ def generate_report(full_results, ops, sub_pct_str, rounds, level):
         lines.append(f"{i:<4} {name:<8} {wtype:<10} {new_pow:>8} {opt_pow:>8} {gain:>6}")
     lines.append("")
 
-    lines.append("二、指定副词条彩武贪心分配过程\n")
+    # 任务二/三 详细过程
+    lines.append("二、贪心算法详细过程\n")
+    for idx, details in enumerate(all_type_details, 1):
+        lines.append(f"第{idx}轮：每种彩武类型的最佳总净增长")
+        lines.append(f"{'彩武类型':<10} {'总净增长':>8}   {'主提升角色(首位)':<12}")
+        lines.append("-" * 40)
+        # 按增益降序排列显示
+        sorted_types = sorted(details.items(), key=lambda x: x[1][0], reverse=True)
+        for wtype, (gain, first_name, chain) in sorted_types:
+            lines.append(f"{wtype:<10} {gain:>8.0f}   {first_name:<12}")
+        lines.append("")
+        # 输出被选中的类型的具体链条
+        # 找到实际执行的那一轮（ops 中对应 round 编号）
+        if idx <= len(ops):
+            chosen = ops[idx-1]
+            lines.append(f"本轮实际选择：{chosen['type']}，链条详情：")
+            for step_idx, (cname, weapon, boost, from_who) in enumerate(chosen['steps']):
+                if from_who is None:
+                    lines.append(f"  -> {cname} 获得 {weapon}，战力变化 {boost:+.0f}")
+                else:
+                    lines.append(f"  -> {cname} 获得 {weapon}（来自 {from_who}），战力变化 {boost:+.0f}")
+            lines.append(f"  本轮总净增长：{sum(s[2] for s in chosen['steps']):+.0f}")
+        lines.append("")
+    # 全队总净增长
     total_all = 0
     for log in ops:
-        lines.append(f"第{log['round']}轮：发放彩{log['type']}(总攻击加成 {4.68+float(sub_pct_str):.2f}%)")
-        for idx, (cname, weapon, boost, from_who) in enumerate(log['steps']):
-            if idx == 0:
-                lines.append(f"  → 主提升：{cname} 获得 {weapon}，战力变化 {boost:+.0f}")
-            else:
-                lines.append(f"  → 武器转移：{cname} 获得 {weapon}（来自 {from_who}），战力变化 {boost:+.0f}")
+        for _, _, boost, _ in log['steps']:
             total_all += boost
-        lines.append(f"  本轮总净增长：{sum(s[2] for s in log['steps']):+.0f}\n")
     lines.append(f"全队总战力净增长：{total_all:+.0f}\n")
 
     lines.append("============================================================")
@@ -489,7 +520,7 @@ def main():
         rounds = 5
 
     print(f"\n开始贪心模拟（副词条 {sub_pct_str}%，{rounds}轮）...")
-    ops = simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismatic_info, sub_pct, rounds)
+    ops, all_details = simulate_greedy(base_data, equip_data, optimal_power, normal_types, prismatic_info, sub_pct, rounds)
 
     print("\n=== 分配结果 ===")
     total_all = 0
@@ -504,7 +535,7 @@ def main():
     print(f"\n全队总战力净增长：{total_all:+.0f}")
 
     # 生成带时间戳的报告
-    report = generate_report(full_results, ops, sub_pct_str, rounds, LEVEL)
+    report = generate_report(full_results, ops, all_details, sub_pct_str, rounds, LEVEL)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_filename = f"report_{timestamp}.txt"
     report_path = os.path.join(SCRIPT_DIR, report_filename)
