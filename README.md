@@ -13,6 +13,7 @@
 
 ## 仓库结构
 
+```
 pcr-rainbow-weapon-type-max-power-optimizer/
 ├── data/ # 所有输入数据文件
 │ ├── base_panel_stats.txt # 角色不穿 EX 装备的面板属性
@@ -24,6 +25,7 @@ pcr-rainbow-weapon-type-max-power-optimizer/
 ├── pcr_optimizer.py # 主程序（交互运行）
 ├── README.md # 本文件
 └── report_YYYYMMDD_HHMMSS.txt # 程序生成的战力优化报告
+```
 
 ---
 
